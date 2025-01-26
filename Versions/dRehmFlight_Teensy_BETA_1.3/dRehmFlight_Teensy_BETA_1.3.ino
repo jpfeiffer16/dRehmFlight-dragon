@@ -31,9 +31,9 @@ Everyone that sends me pictures and videos of your flying creations! -Nick
 //========================================================================================================================//
 
 //Uncomment only one receiver type
-#define USE_PWM_RX
+//#define USE_PWM_RX
 //#define USE_PPM_RX
-//#define USE_SBUS_RX
+#define USE_SBUS_RX
 //#define USE_DSM_RX
 static const uint8_t num_DSM_channels = 6; //If using DSM RX, change this to match the number of transmitter channels you have
 
@@ -64,6 +64,7 @@ static const uint8_t num_DSM_channels = 6; //If using DSM RX, change this to mat
 #include <Wire.h>     //I2c communication
 #include <SPI.h>      //SPI communication
 #include <PWMServo.h> //Commanding any extra actuators, installed with teensyduino installer
+#include <EEPROM.h>   //For storing values
 
 #if defined USE_SBUS_RX
   #include "src/SBUS/SBUS.h"   //sBus interface
@@ -146,12 +147,13 @@ static const uint8_t num_DSM_channels = 6; //If using DSM RX, change this to mat
 //========================================================================================================================//
 
 //Radio failsafe values for every channel in the event that bad reciever data is detected. Recommended defaults:
-unsigned long channel_1_fs = 1000; //thro
-unsigned long channel_2_fs = 1500; //ail
-unsigned long channel_3_fs = 1500; //elev
+unsigned long channel_1_fs = 1500; //ail
+unsigned long channel_2_fs = 1500; //elev
+unsigned long channel_3_fs = 1000; //thro
 unsigned long channel_4_fs = 1500; //rudd
 unsigned long channel_5_fs = 2000; //gear, greater than 1500 = throttle cut
 unsigned long channel_6_fs = 2000; //aux1
+unsigned long channel_7_fs = 2000; //aux2
 
 //Filter parameters - Defaults tuned for 2kHz loop rate; Do not touch unless you know what you are doing:
 float B_madgwick = 0.04;  //Madgwick filter parameter
@@ -168,12 +170,12 @@ float MagScaleY = 1.0;
 float MagScaleZ = 1.0;
 
 //IMU calibration parameters - calibrate IMU using calculate_IMU_error() in the void setup() to get these values, then comment out calculate_IMU_error()
-float AccErrorX = 0.0;
-float AccErrorY = 0.0;
-float AccErrorZ = 0.0;
-float GyroErrorX = 0.0;
-float GyroErrorY= 0.0;
-float GyroErrorZ = 0.0;
+float AccErrorX = 0.19;
+float AccErrorY = -0.09;
+float AccErrorZ = 0.05;
+float GyroErrorX = -6.29;
+float GyroErrorY = 3.12;
+float GyroErrorZ = -0.06;
 
 //Controller parameters (take note of defaults before modifying!): 
 float i_limit = 25.0;     //Integrator saturation level, mostly for safety (default 25.0)
@@ -254,9 +256,11 @@ unsigned long current_time, prev_time;
 unsigned long print_counter, serial_counter;
 unsigned long blink_counter, blink_delay;
 bool blinkAlternate;
+bool setFlaperonMode = false;
+float flaperonOffset = 0;
 
 //Radio communication:
-unsigned long channel_1_pwm, channel_2_pwm, channel_3_pwm, channel_4_pwm, channel_5_pwm, channel_6_pwm;
+unsigned long channel_1_pwm, channel_2_pwm, channel_3_pwm, channel_4_pwm, channel_5_pwm, channel_6_pwm, channel_7_pwm;
 unsigned long channel_1_pwm_prev, channel_2_pwm_prev, channel_3_pwm_prev, channel_4_pwm_prev;
 
 #if defined USE_SBUS_RX
@@ -308,6 +312,7 @@ bool armedFly = false;
 void setup() {
   Serial.begin(500000); //USB serial
   delay(500);
+  Serial.println("starting");
   
   //Initialize all pins
   pinMode(13, OUTPUT); //Pin 13 LED blinker on board, do not modify 
@@ -340,6 +345,7 @@ void setup() {
   channel_4_pwm = channel_4_fs;
   channel_5_pwm = channel_5_fs;
   channel_6_pwm = channel_6_fs;
+  channel_7_pwm = channel_7_fs;
 
   //Initialize IMU communication
   IMUinit();
@@ -349,14 +355,23 @@ void setup() {
   //Get IMU error to zero accelerometer and gyro readings, assuming vehicle is level when powered up
   //calculate_IMU_error(); //Calibration parameters printed to serial monitor. Paste these in the user specified variables section, then comment this out forever.
 
+  //Load flaperon values
+  //float flaperonOffset = EEPROM.read(0);
+  //Serial.println("flaperonOffset: %f", flaperonOffset);
+  //if (flaperonOffset > 1) {
+  //  flaperonOffset = 0;
+  //  EEPROM.write(0, 0);
+  //}
+  //Serial.println("flaperonOffset: %f", flaperonOffset);
+
   //Arm servo channels
   servo1.write(0); //Command servo angle from 0-180 degrees (1000 to 2000 PWM)
   servo2.write(0); //Set these to 90 for servos if you do not want them to briefly max out on startup
-  servo3.write(0); //Keep these at 0 if you are using servo outputs for motors
-  servo4.write(0);
-  servo5.write(0);
-  servo6.write(0);
-  servo7.write(0);
+  //servo3.write(0); //Keep these at 0 if you are using servo outputs for motors
+  //servo4.write(0);
+  //servo5.write(1500);
+  //servo6.write(0);
+  //servo7.write(0);
   
   delay(5);
 
@@ -408,6 +423,7 @@ void loop() {
 
   // Get arming status
   armedStatus(); //Check if the throttle cut is off and throttle is low.
+  //Serial.println(armedFly);
 
   //Get vehicle state
   getIMUdata(); //Pulls raw gyro, accelerometer, and magnetometer data from IMU and LP filters to remove noise
@@ -417,9 +433,15 @@ void loop() {
   getDesState(); //Convert raw commands to normalized values based on saturated control limits
   
   //PID Controller - SELECT ONE:
-  controlANGLE(); //Stabilize on angle setpoint
-  //controlANGLE2(); //Stabilize on angle setpoint using cascaded method. Rate controller must be tuned well first!
-  //controlRATE(); //Stabilize on rate setpoint
+  if (channel_5_pwm < 1070) {
+    controlANGLE(); //Stabilize on angle setpoint
+    //controlANGLE2(); //Stabilize on angle setpoint using cascaded method. Rate controller must be tuned well first!
+  } else if (channel_5_pwm >= 1070 && channel_5_pwm <=1700) {
+    controlRATE(); //Stabilize on rate setpoint
+  } else {
+    // TODO: Probably should clean this up a bit
+    // Do nothing, we will pass through values in the mixer
+  }
 
   //Actuator mixing and scaling to PWM values
   controlMixer(); //Mixes PID outputs to scaled actuator commands -- custom mixing assignments done here
@@ -452,8 +474,6 @@ void loop() {
 //                                                      FUNCTIONS                                                         //                           
 //========================================================================================================================//
 
-
-
 void controlMixer() {
   //DESCRIPTION: Mixes scaled commands from PID controller to actuator outputs based on vehicle configuration
   /*
@@ -469,30 +489,83 @@ void controlMixer() {
    *roll_PID, pitch_PID, yaw_PID - stabilized axis variables
    *roll_passthru, pitch_passthru, yaw_passthru - direct unstabilized command passthrough
    *channel_6_pwm - free auxillary channel, can be used to toggle things with an 'if' statement
+   *channel_7_pwm - free auxillary channel, can be used to toggle things with an 'if' statement
    */
    
-  //Quad mixing - EXAMPLE
-  m1_command_scaled = thro_des - pitch_PID + roll_PID + yaw_PID; //Front Left
-  m2_command_scaled = thro_des - pitch_PID - roll_PID - yaw_PID; //Front Right
-  m3_command_scaled = thro_des + pitch_PID - roll_PID + yaw_PID; //Back Right
-  m4_command_scaled = thro_des + pitch_PID + roll_PID - yaw_PID; //Back Left
+  // Fixed wing mix
+  m1_command_scaled = 0;
+  m2_command_scaled = 0;
+  m3_command_scaled = 0;
+  m4_command_scaled = 0;
   m5_command_scaled = 0;
   m6_command_scaled = 0;
 
   //0.5 is centered servo, 0.0 is zero throttle if connecting to ESC for conventional PWM, 1.0 is max throttle
-  s1_command_scaled = 0;
-  s2_command_scaled = 0;
-  s3_command_scaled = 0;
-  s4_command_scaled = 0;
-  s5_command_scaled = 0;
-  s6_command_scaled = 0;
-  s7_command_scaled = 0;
- 
+  float gain_factor = 1;
+  s1_command_scaled = roll_passthru + .5;    // Aileron 1
+  s2_command_scaled = roll_passthru + .5;    // Aileron 2
+  s3_command_scaled = pitch_passthru + .5;  // Elevator 1
+  s4_command_scaled = pitch_passthru + .5;  // Elevator 2
+  s5_command_scaled = yaw_passthru + .5;                      // Rudder
+  if (channel_5_pwm < 1070) {
+    float roll_des = (roll_PID * gain_factor);
+    s1_command_scaled += roll_des;
+    s2_command_scaled += roll_des;
+    float pitch_des = (pitch_PID * gain_factor);
+    s3_command_scaled += pitch_des;
+    s4_command_scaled += pitch_des;
+    s5_command_scaled += yaw_PID;
+  }
+  if (channel_5_pwm >= 1070 && channel_5_pwm <=1700) {
+    float roll_des = (roll_PID * gain_factor);
+    s1_command_scaled += roll_des;
+    s2_command_scaled += roll_des;
+    float pitch_des = (pitch_PID * gain_factor);
+    s3_command_scaled += pitch_des;
+    s4_command_scaled += pitch_des;
+    s5_command_scaled += yaw_PID;
+  }
+  //if (channel_5_pwm > 1700) {
+  //  s3_command_scaled += pitch_passthru;
+  //  s4_command_scaled += pitch_passthru;
+  //}
+
+                                                                        //
+  if (channel_7_pwm > 1700) {
+    // Sport Mode!
+    s3_command_scaled -= (roll_passthru / 3);  // Elevator 1
+    s4_command_scaled += (roll_passthru / 3);  // Elevator 2
+    s6_command_scaled = roll_passthru;
+    s7_command_scaled = roll_passthru * -1;
+  } else {
+    s6_command_scaled = 0;
+    if (channel_6_pwm < 1070) {
+      s6_command_scaled = 0;
+      s7_command_scaled = 0;
+    }
+    if (channel_6_pwm >= 1070 && channel_6_pwm <=1700) {
+      s6_command_scaled = .5;
+      s7_command_scaled = .5;
+    }
+    if (channel_6_pwm > 1700) {
+      s6_command_scaled = .8;
+      s7_command_scaled = .8;
+      // s1_command_scaled += .2;
+      // s2_command_scaled -= .2;
+    }
+  }
+
+  // Flaperon Set Mode
+  // if (setFlaperonMode) {
+  //   flaperonOffset = roll_passthru;
+  //   s1_command_scaled = roll_passthru + .5;
+  //   s2_command_scaled = (-1 * roll_passthru) + .5;
+  // }
 }
 
 void armedStatus() {
-  //DESCRIPTION: Check if the throttle cut is off and the throttle input is low to prepare for flight.
-  if ((channel_5_pwm < 1500) && (channel_1_pwm < 1050)) {
+  //DESCRIPTION: Check if the throttle cut is off and the throttle input is low to prepare for flight
+  if (channel_3_pwm < 1050) {
     armedFly = true;
   }
 }
@@ -910,9 +983,10 @@ void getDesState() {
    * (rate mode). yaw_des is scaled to be within max yaw in degrees/sec. Also creates roll_passthru, pitch_passthru, and
    * yaw_passthru variables, to be used in commanding motors/servos with direct unstabilized commands in controlMixer().
    */
-  thro_des = (channel_1_pwm - 1000.0)/1000.0; //Between 0 and 1
-  roll_des = (channel_2_pwm - 1500.0)/500.0; //Between -1 and 1
-  pitch_des = (channel_3_pwm - 1500.0)/500.0; //Between -1 and 1
+
+  roll_des = (channel_1_pwm - 1500.0)/500.0; //Between -1 and 1
+  pitch_des = (channel_2_pwm - 1500.0)/500.0; //Between -1 and 1
+  thro_des = (channel_3_pwm - 1000.0)/1000.0; //Between 0 and 1
   yaw_des = (channel_4_pwm - 1500.0)/500.0; //Between -1 and 1
   roll_passthru = roll_des/2.0; //Between -0.5 and 0.5
   pitch_passthru = pitch_des/2.0; //Between -0.5 and 0.5
@@ -1172,6 +1246,7 @@ void getCommands() {
     channel_4_pwm = getRadioPWM(4);
     channel_5_pwm = getRadioPWM(5);
     channel_6_pwm = getRadioPWM(6);
+    channel_7_pwm = getRadioPWM(7);
     
   #elif defined USE_SBUS_RX
     if (sbus.read(&sbusChannels[0], &sbusFailSafe, &sbusLostFrame))
@@ -1185,6 +1260,7 @@ void getCommands() {
       channel_4_pwm = sbusChannels[3] * scale + bias;
       channel_5_pwm = sbusChannels[4] * scale + bias;
       channel_6_pwm = sbusChannels[5] * scale + bias; 
+      channel_7_pwm = sbusChannels[6] * scale + bias; 
     }
 
   #elif defined USE_DSM_RX
@@ -1201,6 +1277,7 @@ void getCommands() {
         channel_4_pwm = values[3];
         channel_5_pwm = values[4];
         channel_6_pwm = values[5];
+        channel_7_pwm = values[6];
     }
   #endif
   
@@ -1233,6 +1310,7 @@ void failSafe() {
   int check4 = 0;
   int check5 = 0;
   int check6 = 0;
+  int check7 = 0;
 
   //Triggers for failure criteria
   if (channel_1_pwm > maxVal || channel_1_pwm < minVal) check1 = 1;
@@ -1241,6 +1319,7 @@ void failSafe() {
   if (channel_4_pwm > maxVal || channel_4_pwm < minVal) check4 = 1;
   if (channel_5_pwm > maxVal || channel_5_pwm < minVal) check5 = 1;
   if (channel_6_pwm > maxVal || channel_6_pwm < minVal) check6 = 1;
+  if (channel_7_pwm > maxVal || channel_7_pwm < minVal) check7 = 1;
 
   //If any failures, set to default failsafe values
   if ((check1 + check2 + check3 + check4 + check5 + check6) > 0) {
@@ -1250,6 +1329,7 @@ void failSafe() {
     channel_4_pwm = channel_4_fs;
     channel_5_pwm = channel_5_fs;
     channel_6_pwm = channel_6_fs;
+    channel_7_pwm = channel_7_fs;
   }
 }
 
@@ -1585,6 +1665,8 @@ void printRadioData() {
     Serial.print(channel_5_pwm);
     Serial.print(F(" CH6:"));
     Serial.println(channel_6_pwm);
+    Serial.print(F(" CH7:"));
+    Serial.println(channel_7_pwm);
   }
 }
 
